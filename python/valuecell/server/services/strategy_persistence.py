@@ -1,9 +1,13 @@
+import json
+from dataclasses import asdict
 from datetime import datetime, timezone
-from typing import Optional
+from pathlib import Path
+from typing import Any, Optional
 
 from loguru import logger
 
 from valuecell.agents.common.trading import models as agent_models
+from valuecell.server.config.settings import get_settings
 from valuecell.server.db.repositories.strategy_repository import (
     get_strategy_repository,
 )
@@ -369,3 +373,85 @@ def persist_instructions(
             )
             continue
     return inserted
+
+
+def _serialize_for_json(obj: Any) -> Any:
+    """Recursively serialize objects for JSON output.
+
+    Handles:
+    - Pydantic BaseModel: uses model_dump()
+    - dataclass: uses asdict()
+    - Enum: uses value
+    - Other types: returns as-is (will use default=str in json.dump)
+    """
+    from pydantic import BaseModel
+
+    if isinstance(obj, BaseModel):
+        return obj.model_dump(exclude_none=True)
+    if hasattr(obj, "__dataclass_fields__"):
+        return asdict(obj)
+    if hasattr(obj, "value"):  # Enum
+        return obj.value
+    if isinstance(obj, (list, tuple)):
+        return [_serialize_for_json(item) for item in obj]
+    if isinstance(obj, dict):
+        return {k: _serialize_for_json(v) for k, v in obj.items()}
+    return obj
+
+
+def persist_cycle_json(result: agent_models.DecisionCycleResult, strategy_id: str) -> bool:
+    """Persist a complete cycle result to JSON file in strategy_autoresume directory.
+
+    Saves the full cycle data including:
+    - Cycle metadata (compose_id, cycle_index, timestamp, rationale)
+    - Strategy summary
+    - Instructions
+    - Trades
+    - Portfolio view
+    - Trade digest
+
+    Returns True on success, False on failure.
+    """
+    try:
+        settings = get_settings()
+        base_dir = settings.BASE_DIR
+        autoresume_dir = base_dir / "strategy_autoresume"
+        autoresume_dir.mkdir(exist_ok=True)
+
+        # Create strategy-specific subdirectory
+        strategy_dir = autoresume_dir / strategy_id
+        strategy_dir.mkdir(exist_ok=True)
+
+        # Convert dataclass to dict and serialize nested objects
+        cycle_dict = asdict(result)
+        cycle_data = _serialize_for_json(cycle_dict)
+
+        # Add additional metadata
+        cycle_data["strategy_id"] = strategy_id
+        if result.timestamp_ms:
+            cycle_data["timestamp_iso"] = datetime.fromtimestamp(
+                result.timestamp_ms / 1000.0, tz=timezone.utc
+            ).isoformat()
+
+        # Generate filename: cycle_{cycle_index}_{compose_id}.json
+        filename = f"cycle_{result.cycle_index:06d}_{result.compose_id}.json"
+        file_path = strategy_dir / filename
+
+        # Write JSON file with pretty formatting
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(cycle_data, f, indent=2, ensure_ascii=False, default=str)
+
+        logger.debug(
+            "Persisted cycle JSON for strategy={} cycle_index={} to {}",
+            strategy_id,
+            result.cycle_index,
+            file_path,
+        )
+        return True
+    except Exception:
+        logger.exception(
+            "persist_cycle_json failed for strategy={} cycle_index={}",
+            strategy_id,
+            result.cycle_index if hasattr(result, "cycle_index") else "unknown",
+        )
+        return False

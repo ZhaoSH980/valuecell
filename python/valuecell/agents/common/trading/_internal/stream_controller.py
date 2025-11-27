@@ -214,6 +214,22 @@ class StreamController:
                 logger.info(
                     "Persisted strategy summary for strategy={}", self.strategy_id
                 )
+
+            # Persist cycle to JSON file (default enabled)
+            try:
+                ok = strategy_persistence.persist_cycle_json(result, self.strategy_id)
+                if ok:
+                    logger.debug(
+                        "Persisted cycle JSON for strategy={} cycle_index={}",
+                        self.strategy_id,
+                        result.cycle_index,
+                    )
+            except Exception:
+                logger.warning(
+                    "Failed to persist cycle JSON for strategy={} cycle_index={}",
+                    self.strategy_id,
+                    result.cycle_index,
+                )
         except Exception:
             logger.exception("Error persisting cycle results for {}", self.strategy_id)
 
